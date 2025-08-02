@@ -1,0 +1,195 @@
+// Smart Street Light Energy Management System (STM32)
+// Tools: STM32CubeIDE, HAL Libraries
+
+// ======================== Core/Inc/main.h ========================
+#ifndef MAIN_H
+#define MAIN_H
+#include "stm32f1xx_hal.h"
+#include <string.h>
+#include <stdio.h>
+void SystemClock_Config(void);
+#endif
+
+// ======================== Core/Inc/rtc.h ========================
+#ifndef RTC_H
+#define RTC_H
+#include "main.h"
+void RTC_ReadTime(RTC_TimeTypeDef *time, RTC_DateTypeDef *date);
+void Display_Time(RTC_TimeTypeDef time);
+void Light_Control_By_Time(RTC_TimeTypeDef time);
+#endif
+
+// ======================== Core/Inc/gsm.h ========================
+#ifndef GSM_H
+#define GSM_H
+#include "main.h"
+void GSM_Init();
+uint8_t GSM_CheckSMS(char *buffer);
+#endif
+
+// ======================== Core/Inc/eeprom.h ========================
+#ifndef EEPROM_H
+#define EEPROM_H
+#include "main.h"
+void EEPROM_Write(uint8_t devAddr, uint8_t memAddr, uint8_t data);
+uint8_t EEPROM_Read(uint8_t devAddr, uint8_t memAddr);
+#endif
+
+// ======================== Core/Inc/sdcard.h ========================
+#ifndef SDCARD_H
+#define SDCARD_H
+#include "main.h"
+#include "fatfs.h"
+void Log_Data_To_SD(RTC_TimeTypeDef time, float light);
+#endif
+
+// ======================== Core/Inc/adc.h ========================
+#ifndef ADC_H
+#define ADC_H
+#include "main.h"
+float Read_Light_Sensor();
+#endif
+
+// ======================== Core/Src/main.c ========================
+#include "main.h"
+#include "rtc.h"
+#include "gsm.h"
+#include "eeprom.h"
+#include "sdcard.h"
+#include "adc.h"
+
+RTC_TimeTypeDef sTime;
+RTC_DateTypeDef sDate;
+char smsBuffer[160];
+
+int main(void)
+{
+    HAL_Init();
+    SystemClock_Config();
+    MX_GPIO_Init();
+    MX_USART1_UART_Init();
+    MX_SPI1_Init();
+    MX_I2C1_Init();
+    MX_ADC1_Init();
+    MX_RTC_Init();
+    MX_FATFS_Init();
+
+    LCD_Init();
+    LCD_Clear(WHITE);
+    LCD_SetCursor(0, 0);
+    LCD_Print("Smart Street Light");
+
+    EEPROM_Write(0xA0, 0x00, 0x10);
+    GSM_Init();
+
+    while (1)
+    {
+        RTC_ReadTime(&sTime, &sDate);
+        Display_Time(sTime);
+        Light_Control_By_Time(sTime);
+
+        float light = Read_Light_Sensor();
+        Log_Data_To_SD(sTime, light);
+
+        if (GSM_CheckSMS(smsBuffer))
+        {
+            if (strstr(smsBuffer, "LIGHT ON"))
+                HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_SET);
+            else if (strstr(smsBuffer, "LIGHT OFF"))
+                HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_RESET);
+        }
+        HAL_Delay(1000);
+    }
+}
+
+// ======================== Core/Src/rtc.c ========================
+#include "rtc.h"
+void RTC_ReadTime(RTC_TimeTypeDef *time, RTC_DateTypeDef *date)
+{
+    HAL_RTC_GetTime(&hrtc, time, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&hrtc, date, RTC_FORMAT_BIN);
+}
+void Display_Time(RTC_TimeTypeDef time)
+{
+    char buffer[30];
+    sprintf(buffer, "Time: %02d:%02d:%02d", time.Hours, time.Minutes, time.Seconds);
+    LCD_SetCursor(0, 20);
+    LCD_Print(buffer);
+}
+void Light_Control_By_Time(RTC_TimeTypeDef time)
+{
+    if (time.Hours >= 18 || time.Hours < 6)
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_SET);
+    else
+        HAL_GPIO_WritePin(GPIOA, GPIO_PIN_0, GPIO_PIN_RESET);
+}
+
+// ======================== Core/Src/gsm.c ========================
+#include "gsm.h"
+extern UART_HandleTypeDef huart1;
+char gsm_rx[160];
+void GSM_Init()
+{
+    HAL_UART_Transmit(&huart1, (uint8_t*)"AT\r", 3, 100);
+    HAL_Delay(1000);
+    HAL_UART_Transmit(&huart1, (uint8_t*)"AT+CMGF=1\r", 10, 100);
+    HAL_Delay(1000);
+    HAL_UART_Transmit(&huart1, (uint8_t*)"AT+CNMI=1,2,0,0,0\r", 19, 100);
+    HAL_Delay(1000);
+}
+uint8_t GSM_CheckSMS(char *buffer)
+{
+    if (strstr((char*)gsm_rx, "+CMT:"))
+    {
+        strcpy(buffer, gsm_rx);
+        memset(gsm_rx, 0, sizeof(gsm_rx));
+        return 1;
+    }
+    return 0;
+}
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    static uint16_t i = 0;
+    if (huart->Instance == USART1)
+    {
+        HAL_UART_Receive_IT(&huart1, (uint8_t*)&gsm_rx[i++], 1);
+    }
+}
+
+// ======================== Core/Src/eeprom.c ========================
+#include "eeprom.h"
+void EEPROM_Write(uint8_t devAddr, uint8_t memAddr, uint8_t data)
+{
+    HAL_I2C_Mem_Write(&hi2c1, devAddr, memAddr, I2C_MEMADD_SIZE_8BIT, &data, 1, HAL_MAX_DELAY);
+}
+uint8_t EEPROM_Read(uint8_t devAddr, uint8_t memAddr)
+{
+    uint8_t data;
+    HAL_I2C_Mem_Read(&hi2c1, devAddr, memAddr, I2C_MEMADD_SIZE_8BIT, &data, 1, HAL_MAX_DELAY);
+    return data;
+}
+
+// ======================== Core/Src/sdcard.c ========================
+#include "sdcard.h"
+void Log_Data_To_SD(RTC_TimeTypeDef time, float light)
+{
+    FATFS fs;
+    FIL file;
+    char data[64];
+    UINT bw;
+    f_mount(&fs, "", 1);
+    f_open(&file, "log.txt", FA_OPEN_APPEND | FA_WRITE);
+    sprintf(data, "%02d:%02d:%02d Light: %.2f\r\n", time.Hours, time.Minutes, time.Seconds, light);
+    f_write(&file, data, strlen(data), &bw);
+    f_close(&file);
+}
+
+// ======================== Core/Src/adc.c ========================
+#include "adc.h"
+float Read_Light_Sensor()
+{
+    HAL_ADC_Start(&hadc1);
+    HAL_ADC_PollForConversion(&hadc1, 10);
+    uint16_t val = HAL_ADC_GetValue(&hadc1);
+    return ((float)val * 3.3 / 4095);
+}
